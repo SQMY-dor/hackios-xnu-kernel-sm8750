@@ -27,6 +27,11 @@
  * what it was taken for must not become a volume key held down for the whole session).
  * No interrupt is used; what one would take is said at the end of this file.
  *
+ * The addresses below are the SoC's, not this phone's: sys/redwood_soc.h has the arbiter's three
+ * windows and which peripheral each key is on, per SoC. Where the two phones were found to differ
+ * the table says so; the register layouts in this file were the same on both as far as the vendor
+ * device trees go.
+ *
  * The mapping: the phone has what the iPhone X has, whose user space runs here -- a side button
  * and two volume keys, no home button. Power is the side button (REDWOOD_BUTTON_LOCK).
  *
@@ -49,6 +54,7 @@
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/redwood_soc.h>
 #include <sys/systm.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -93,14 +99,10 @@ wr(vm_offset_t address, uint32_t value)
 
 /* ---- the PMIC arbiter ---------------------------------------------------------------------------- */
 
-#define ARB_CORE_PHYS           0x0c440000UL    /* "core": the version, and which peripheral each channel is */
-#define ARB_CORE_SIZE           0x1100UL
-#define ARB_CNFG_PHYS           0x0c40a000UL    /* "cnfg": which system owns each channel */
-#define ARB_CNFG_SIZE           0x1000UL
-#define ARB_OBSERVER_PHYS       0x0e600000UL    /* "obsrvr": 0x10000 per system, 0x80 per channel in it */
-#define ARB_OBSERVER_SIZE       0x10000UL       /* ours is the first */
+/* (the arbiter's three windows -- "core", "cnfg", "obsrvr" -- and their sizes are the SoC's:
+ * sys/redwood_soc.h. Which peripheral each key is on is there too.) */
 #define ARB_SYSTEM              0               /* who we are to the arbiter: the device tree's "qcom,ee" */
-
+#define ARB_OBSERVER_STRIDE     0x10000UL       /* per system in the observer window; 0x80 per channel in that */
 #define ARB_VERSION             0x000
 #define ARB_VERSION_5           0x50000000u     /* what follows is version 5's; 7 moved things again */
 #define ARB_VERSION_7           0x70000000u
@@ -149,8 +151,8 @@ struct peripheral {
 	uint16_t        channel;
 	bool            found;
 };
-static struct peripheral pon = { .name = "the PMK8350's power-on block", .id = 0x013 };          /* registers 0x1300 of slave 0 */
-static struct peripheral pin = { .name = "GPIO6 of the PM7325", .id = 0x18d };                   /* registers 0x8d00 of slave 1 */
+static struct peripheral pon;                   /* the power-on block: power, volume down (the SoC's) */
+static struct peripheral pin;                   /* the PMIC GPIO the volume-up key pulls low (the SoC's) */
 
 /* How the reads have gone: said once a minute. */
 static struct {
@@ -164,7 +166,7 @@ static struct {
 static const char *
 spmi_read(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t count)
 {
-	vm_offset_t channel = arb_observer + 0x10000UL * ARB_SYSTEM + 0x80UL * p->channel;
+	vm_offset_t channel = arb_observer + ARB_OBSERVER_STRIDE * ARB_SYSTEM + 0x80UL * p->channel;
 	uint64_t start = mach_absolute_time(), now, interval, taken;
 	uint32_t status, data[2];
 	const char *problem = NULL;
@@ -451,13 +453,18 @@ static void
 buttons_thread(void *parameter, __unused wait_result_t result)
 {
 	uint32_t steps = (uint32_t)(uintptr_t)parameter, version, channels;
+	const struct redwood_soc *soc = redwood_soc();
 	bool pon_known, pin_known;
 
-	printf("buttons: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n", ARB_CORE_PHYS, ARB_CNFG_PHYS,
-	    ARB_OBSERVER_PHYS);
-	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
-	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
-	arb_observer = ml_io_map(ARB_OBSERVER_PHYS, ARB_OBSERVER_SIZE);
+	pon.name = soc->spmi_pon_name;
+	pon.id = soc->spmi_pon_id;
+	pin.name = soc->spmi_pin_name;
+	pin.id = soc->spmi_pin_id;
+	printf("buttons: step 1: map the PMIC arbiter (%#llx, %#llx, %#llx) and read its version\n",
+	    soc->spmi_core_phys, soc->spmi_cnfg_phys, soc->spmi_observer_phys);
+	arb_core = ml_io_map(soc->spmi_core_phys, soc->spmi_core_size);
+	arb_cnfg = ml_io_map(soc->spmi_cnfg_phys, soc->spmi_cnfg_size);
+	arb_observer = ml_io_map(soc->spmi_observer_phys, soc->spmi_observer_size);
 	version = rd(arb_core + ARB_VERSION);
 	channels = rd(arb_core + ARB_FEATURES) & 0x7ff;
 	printf("buttons: PMIC arbiter version %#x, %u channels\n", version, channels);

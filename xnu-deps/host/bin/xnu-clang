@@ -3,12 +3,26 @@
 #  - forces an Apple Mach-O target (stock Linux clang defaults to ELF)
 #  - drops flags only Apple's clang understands
 #  - links with the cctools ld64
+#
+# Local change (build-verify, SM8750 port work): -enable-trivial-auto-var-init-zero-knowing-it-will-
+# be-removed-from-clang is passed to the compiler when the compiler needs it. XNU's makefiles pair it
+# with -ftrivial-auto-var-init=zero; the clang on this machine (Debian clang 14.0.6) refuses that flag
+# without the enable switch, while clang >= 16 rejects the switch itself. The decision is made once by
+# asking the compiler and cached in /tmp, so this wrapper works with either.
 HB="$(cd "$(dirname "$0")" && pwd)"
 case "$(basename "$0")" in *++) drv=clang++; extra=(-fno-use-cxa-atexit);; *) drv=clang; extra=();; esac
+ENABLE=-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+CACHE=/tmp/.xnu-clang-auxvar-$drv
+if [ ! -s "$CACHE" ]; then
+  if printf "int x;\n" | /usr/bin/$drv -x c -c - -o /dev/null -ftrivial-auto-var-init=zero "$ENABLE" >/dev/null 2>&1;
+  then echo yes > "$CACHE"; else echo no > "$CACHE"; fi
+fi
+NEED=$(cat "$CACHE")
 args=()
 for a in "$@"; do
   case "$a" in
     -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) ;;
+    -ftrivial-auto-var-init=zero) args+=("$a"); [ "$NEED" = yes ] && args+=("$ENABLE");;
     -fapple-kext-vtable-verify|-Wno-vla-cxx-extension) ;;
     -Werror|-Werror=*|-Weverything|-pedantic-errors) ;;
     *) args+=("$a");;

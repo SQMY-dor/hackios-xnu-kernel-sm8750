@@ -517,11 +517,21 @@ struct platform {
 	const char *name;
 	uint64_t io_base, io_size;       /* one window covering the SoC peripherals */
 	uint64_t gic_dist, gic_redist;   /* GICv3 */
+	uint32_t gic_redist_size;        /* the region the redistributor frames live in; 0: 1 MB, which is
+	                                  * what every SoC here used before SM8750's 2 MB (8 cores each
+	                                  * 0x40000 apart) needed saying. */
+	uint32_t gic_redist_stride;      /* the distance between two redistributor frames: the device tree's
+	                                  * "redistributor-stride". 0x20000 (128 KB per core) on every SoC
+	                                  * before SM8750, 0x40000 (256 KB) on SM8750. Written into
+	                                  * /arm-io/gic so the kernel reads it there instead of assuming it. */
 	uint64_t uart;                   /* PL011, 0 if none */
 	int psci_hvc;                    /* the firmware's power interface is called with HVC, not SMC */
 	int log_other_cpu;               /* keep notes in the log partition while a kernel starts on another core */
 	int cores;                       /* at most this many processor cores, numbered from 0 ... */
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
+	uint32_t core_stride;            /* 0: the number is that field alone, one cluster (redwood).
+	                                  * N: a cluster holds N cores and restarts numbering at 0 in the field
+	                                  * above it (SM8750: 6 Oryon performance + 2 Oryon prime, N = 6). */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
 	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
@@ -529,8 +539,9 @@ struct platform {
 
 static const struct platform platform_qemu_virt = {
 	.name = "qemu-virt", .io_base = 0x08000000, .io_size = 0x08000000,
-	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .uart = 0x09000000, .psci_hvc = 1,
-	.cores = 8, .core_shift = 0,
+	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .gic_redist_stride = 0x20000, .uart = 0x09000000,
+	.psci_hvc = 1,
+	.cores = 8, .core_shift = 0, .core_stride = 0,
 	/*
 	 * QEMU's emulated cores stop each other all the time (every flush of a page from all the
 	 * TLBs is a rendezvous of all its CPU threads), and the kernel's patience with a spin lock
@@ -542,8 +553,9 @@ static const struct platform platform_qemu_virt = {
 static const struct platform platform_redwood = {
 	/* io_base must be non-zero: XNU treats a zero SoC base as "no SoC" and skips clock setup. */
 	.name = "redwood", .io_base = 0x00400000, .io_size = 0x3FC00000,
-	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
-	.cores = 8, .core_shift = 8,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .gic_redist_stride = 0x20000, .uart = 0,
+	.log_other_cpu = 1,
+	.cores = 8, .core_shift = 8, .core_stride = 0,
 	/*
 	 * Cores 0-3 are Cortex-A55s (1.8 GHz at most), 4-7 Cortex-A78s (2.4 GHz): a big one is about
 	 * 2.5 times as fast. The kernel uses the small ones only when the big ones are all busy
@@ -553,6 +565,43 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_dodge = {
+	/*
+	 * OnePlus 13 (dodge), Qualcomm SM8750 "Snapdragon 8 Elite" (Pakala, not the SM8850 Kaanapali).
+	 *
+	 * io_base/io_size: 0x00400000..0x40000000, the same window redwood uses. It covers every
+	 * peripheral the loader and the kernel address on SM8750: GIC 0x16000000/0x16080000 (vendor DT
+	 * interrupt-controller@16000000), GCC 0x100000 (clock-controller@100000), TLMM 0xF100000
+	 * (pinctrl@f100000), QUP/SE 0x800000.., UFS 0x1d84000 (ufs@1d84000), IMEM 0x14680000,
+	 * USB 0x0A600000, SPMI 0xC400000 (spmi@c400000), tcsr-mutex 0x1F40000. Nothing the kernel
+	 * maps through /arm-io/ranges falls outside it; AOSS 0xB0000000 and the GOP framebuffer at
+	 * 0xFC800000 are handled by their own drivers. (docs/port-sm8750/loader.md, "io window".)
+	 */
+	.name = "dodge", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	/* arm,gic-v3 in the vendor DT: reg = <0 0x16000000 0 0x10000  0 0x16080000 0 0x200000> */
+	.gic_dist = 0x16000000, .gic_redist = 0x16080000, .gic_redist_size = 0x200000,
+	.gic_redist_stride = 0x40000, .uart = 0, .log_other_cpu = 1,
+	/*
+	 * Eight Qualcomm Oryon cores in two clusters, numbered in two affinity fields:
+	 * cpu@0/100/200/300/400/500 = the six "performance" cores (MPIDR 0x0..0x500) and
+	 * cpu@10000/10100 = the two "prime" cores (MPIDR 0x10000, 0x10100). Both clusters start
+	 * numbering at 0 in the second field, so core_stride = 6 turns the MPIDRs into the numbers
+	 * 0..5 (performance) and 6,7 (prime). Without it 0x10000 and 0x0 would both be "core 0".
+	 */
+	.cores = 8, .core_shift = 8, .core_stride = 6,
+	/*
+	 * Numbers 0-5 (the performance cluster) are the slower ones: the prime cores boost past
+	 * 4 GHz while the performance cluster is at ~3.5 GHz, so the kernel should use 0-5 only when
+	 * 6 and 7 are busy (XNU's machine_routines.c, ml_choose_slow_core_partners()).
+	 * The vendor DT has no capacity-dmips-mhz, so this is a judgement call, not a DT fact.
+	 */
+	.small_cores = 0x3f,
+	/* Display_Reserved 0xFC800000 in Mu-Silicium's dodgePkg MemoryMapLib: the GOP base is
+	 * expected there. INFERRED from the memory map, not observed -- there is no phone here.
+	 * Confirm from the loader's own "display W x H at ..." line on hardware. */
+	.fb_base = 0xFC800000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -560,7 +609,45 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_dodge,
 };
+
+/*
+ * A core's number, and the MPIDR of a number.
+ *
+ * The number is what "bootcpu=", "cpus=", "cpumask=" and small_cores speak in, and what the device
+ * tree's cpu nodes are numbered by. On a single-cluster SoC it is the second affinity field of the
+ * MPIDR alone (core_stride 0). Where the second field restarts at 0 in each cluster -- SM8750: six
+ * Oryon performance cores 0x0..0x500, then two Oryon prime cores 0x10000, 0x10100 -- core_stride is
+ * the size of a cluster and the field above it counts the clusters:
+ *
+ *   number = (mpidr >> shift & 0xff) + (mpidr >> (shift + 8) & 0xff) * stride
+ *   mpidr  = (number / stride) << (shift + 8) | (number % stride) << shift
+ *
+ * so 0x10000 -> 6 and 0x10100 -> 7 instead of collapsing onto 0 and 1. The kernel numbers them the
+ * same way (xnu/files/bsd/sys/redwood_soc.h), which is why the device tree's "reg" can stay the
+ * MPIDR: what the kernel reads back is the same number this loader writes.
+ */
+static uint32_t
+core_number(const struct platform *plat, uint64_t mpidr)
+{
+	uint32_t number = (uint32_t)((mpidr >> plat->core_shift) & 0xff);
+
+	if (plat->core_stride != 0) {
+		number += (uint32_t)((mpidr >> (plat->core_shift + 8)) & 0xff) * plat->core_stride;
+	}
+	return number;
+}
+
+static uint64_t
+core_mpidr(const struct platform *plat, uint32_t number)
+{
+	if (plat->core_stride == 0) {
+		return (uint64_t)number << plat->core_shift;
+	}
+	return ((uint64_t)(number / plat->core_stride) << (plat->core_shift + 8)) |
+	    ((uint64_t)(number % plat->core_stride) << plat->core_shift);
+}
 
 /* ------------------------------------------------------------------------ */
 
@@ -2860,8 +2947,21 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	block_write_requested = 0;
 	block_write_part = -1;
 	for (const char *c = pi.cmdline; *c; c++) {
-		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
-			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
+		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '9') {
+			/*
+			 * The core is named by its number, the same one small_cores and the device tree use:
+			 * on one cluster (core_stride 0) a single digit, as it has always been; where the
+			 * numbers run past 9 into a second cluster (SM8750: the prime cores are 6 and 7,
+			 * still one digit, but a wider SoC would need two) both digits are read.
+			 */
+			uint32_t number = (uint32_t)(c[8] - '0');
+
+			if (PLAT->core_stride != 0 && c[9] >= '0' && c[9] <= '9') {
+				number = number * 10 + (uint32_t)(c[9] - '0');
+			}
+			if (number < (uint32_t)PLAT->cores) {
+				kernel_mpidr = core_mpidr(PLAT, number);
+			}
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
@@ -3174,21 +3274,27 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * arguments the kernel takes that one and the next N-1 of this list and starts them
 	 * itself (PSCI CPU_ON); "cpumask=M" picks by position, bit 0 being the first. So the
 	 * order matters: after the boot core come those whose numbers are nearest to its own
-	 * (on the phone, where the kernel boots on the biggest core, 7: the other big ones
+	 * (on redwood, where the kernel boots on the biggest core, 7: the other big ones
 	 * 6, 5, 4, then the small ones 3, 2, 1). Only cores that are off are listed: the one
 	 * this loader stays on while it watches is not the kernel's, nor any the firmware runs.
+	 * The numbers are core_number()'s, so on a two-cluster SoC (dodge: 0-5 performance,
+	 * 6-7 prime) "nearest" mixes the clusters the same way it mixes the cores of one.
 	 */
 	uint64_t cpu_mpidr[8] = { kernel_mpidr };
-	int cpu_count = 1, boot_core = (int)(kernel_mpidr >> plat->core_shift);
+	int cpu_count = 1, boot_core = (int)core_number(plat, kernel_mpidr);
 
 	if (more_cores) {
 		for (int distance = 1; distance < plat->cores; distance++) {
 			for (int side = 0; side < 2; side++) {
 				int core = side == 0 ? boot_core + distance : boot_core - distance;
-				uint64_t mpidr = (uint64_t)core << plat->core_shift;
+				uint64_t mpidr;
 				int64_t state;
 
-				if (core < 0 || core >= plat->cores || mpidr == this_mpidr) {
+				if (core < 0 || core >= plat->cores) {
+					continue;
+				}
+				mpidr = core_mpidr(plat, (uint32_t)core);
+				if (mpidr == this_mpidr) {
 					continue;
 				}
 				state = psci_call(PSCI_AFFINITY_INFO, mpidr, 0, 0);
@@ -3221,7 +3327,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		dt_prop_u64(&w, "bus-frequency", 100000000ULL);
 		dt_prop_u64(&w, "memory-frequency", 100000000ULL);
 		dt_prop_u64(&w, "peripheral-frequency", 24000000ULL);
-		if (plat->small_cores & (1u << ((cpu_mpidr[i] >> plat->core_shift) & 31))) {
+		if (plat->small_cores & (1u << (core_number(plat, cpu_mpidr[i]) & 31))) {
 			dt_prop_u32(&w, "small-core", 1);
 		}
 		dt_end(&w);
@@ -3246,8 +3352,24 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
+	/* The redistributor region: 1 MB on every SoC before SM8750, whose 8 cores are 0x40000 apart
+	 * (vendor DT "redistributor-stride") and so need 0x200000 -- anything less and the kernel
+	 * cannot find the frames of cores 4..7 (gic_v3_irq.c walks frames of 0x20000 inside this). */
+	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base,
+	    plat->gic_redist_size != 0 ? plat->gic_redist_size : 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	/*
+	 * The distance between two redistributor frames, in the device tree's own 2-cell form
+	 * (<0x0 0x40000>: high word first, then the value) -- 0x20000 (128 KB per core) on every SoC
+	 * before SM8750, 0x40000 (256 KB) on SM8750 (vendor DT "redistributor-stride"). The kernel
+	 * (bsd/... gic_v3_irq.c) walks the redistributor region in steps of this; it used to assume
+	 * 0x20000, which on SM8750 steps through the middle of frames, never matches GICR_TYPER's
+	 * affinity and panics "gic: no redistributor for MPIDR". A reader that wants one 64-bit word
+	 * must combine the two cells (cells[0] << 32 | cells[1]) -- these are big-endian FDT cells,
+	 * not the native 64-bit words "reg" above uses.
+	 */
+	uint32_t gic_stride[2] = { 0, plat->gic_redist_stride != 0 ? plat->gic_redist_stride : 0x20000 };
+	dt_prop(&w, "redistributor-stride", gic_stride, sizeof(gic_stride));
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");
@@ -3956,6 +4078,20 @@ efi_main(efi_handle image, efi_system_table *st)
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
+	/*
+	 * How this loader numbers the cores: the number "bootcpu=", "cpus=", "cpumask=" and
+	 * small_cores speak in, and the MPIDR it starts that core with (PSCI CPU_ON). Printed so a
+	 * session on hardware can confirm the mapping from the loader's own log -- on a phone whose
+	 * cores sit in two clusters (core_stride != 0) it is the one thing here that cannot be
+	 * checked without the silicon.
+	 */
+	print("cores: number -> mpidr (core_shift %d, core_stride %d, small_cores %x):", (uint64_t)PLAT->core_shift,
+	    (uint64_t)PLAT->core_stride, (uint64_t)PLAT->small_cores);
+	for (int number = 0; number < PLAT->cores; number++) {
+		print(" %d -> %x%s", (uint64_t)number, core_mpidr(PLAT, (uint32_t)number),
+		    (PLAT->small_cores & (1u << (number & 31))) ? "*" : "");
+	}
+	print("  (* = small-core)\n");
 
 	install_exception_hook();
 	wdt_arm();

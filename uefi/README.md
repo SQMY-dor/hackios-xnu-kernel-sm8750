@@ -31,6 +31,19 @@ source ../venv/bin/activate
 python3 build_uefi.py -d redwood -r RELEASE     # -> Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd
 ```
 
+**`BASE` is behind the tree the port was last checked against.** `BASE` says
+`e51cd877e31c8fbb322032dc4cb6715e83d25ad3`; `mu-silicium.patch` `git apply --check` passes on
+`42fe563791e51bf5500c2e470ed294ca0c94b97c` (the commit the SM8750/dodge port was read against, and the
+one `files/` was copied from -- see `docs/port-sm8750/loader.md`, "Open questions" 8). Bumping `BASE` to
+that commit is the intended fix; it has not been done here because `e51cd877` is not in the checkout
+available, so whether redwood's own port files survive the move could not be checked. Until it is
+bumped, a fresh `uefi/apply.sh` gives a tree the port was not made against -- compare
+`Platforms/OnePlus/dodgePkg` (or `PakalaPkg`) between the two commits before trusting a build.
+
+Another pitfall: `BootShim/Makefile` calls `llvm-objcopy` by bare name, and some distributions ship it
+only as `/usr/lib/llvm-<n>/bin/llvm-objcopy`; in that case pass `OBJCOPY=/usr/lib/llvm-14/bin/llvm-objcopy`
+(or the equivalent) to `make`. `mkxnuimg.py` builds the shim itself, so it would need the same.
+
 A pitfall: the `mu_nasm` dependency is installed through NuGet and needs Mono. To do without Mono, put the
 system nasm in its place:
 

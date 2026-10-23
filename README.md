@@ -1,5 +1,11 @@
 # HackiOS — XNU kernel
 
+> **This is a fork, for the Snapdragon 8 Elite (SM8750) port.** Upstream is
+> [oosexgang/hackios-xnu-kernel](https://github.com/oosexgang/hackios-xnu-kernel) — use that repository unless you
+> specifically want the SM8750 work, which is documented in [docs/port-sm8750/](docs/port-sm8750/README.md).
+> All credit for HackiOS belongs to OOSEX GANG; this tree adds a device port and the fixes it needed. Nothing here
+> has been run on SM8750 hardware.
+
 **HackiOS** boots Apple's open-source **XNU kernel** (`xnu-8796.121.2`, the kernel of iOS 16.5) on Android phone
 hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd → backboardd → SpringBoard →
 apps. Our own EFI loader, our own replacements for Apple's closed drivers, a UEFI port, and a Linux Wi-Fi driver
@@ -144,6 +150,23 @@ common/new-device.sh <codename> path/to/device.dtb   # profile + loader platform
 
 Then follow [docs/PORTING.md](docs/PORTING.md): the UEFI port, the loader's platform description, the kernel's
 drivers, the firmware. Device profiles live in `common/devices/` (`redwood.conf`, `qemu-virt.conf`, `_template.conf`).
+
+### Snapdragon 8 Elite (SM8750, OnePlus 13 "dodge") — work in progress
+
+A port of this tree to **SM8750 "Snapdragon 8 Elite"** (Qualcomm *Pakala*) is in progress on
+[docs/port-sm8750/](docs/port-sm8750/README.md), targeting the **OnePlus 13 (dodge)**, the SM8750 device
+Mu-Silicium already supports (`Platforms/OnePlus/dodgePkg`).
+
+It is `common/devices/dodge.conf` plus: `platform_dodge` in the loader, a per-SoC parameter table in the
+kernel (`bsd/dev/redwood_soc.c`), and three fixes that were needed by this SoC and are worth knowing about —
+two-cluster core numbering (`core_stride`), the GIC redistributor stride now read from the device tree instead
+of hardcoded, and `tools/check-port.py` to catch drift between a profile, the loader and the device tree
+(`tools/check-port.py --all`).
+
+**Nothing has been booted on SM8750 hardware.** What is verified is that the loader and the kernel build, that
+the kernel patch reproduces the tree, and that the SoC table is in the linked binary — see
+[docs/port-sm8750/README.md](docs/port-sm8750/README.md) for the evidence and the list of numbers that still
+need one session on a phone (the first being the framebuffer base and the memory map).
 
 ## How it works
 

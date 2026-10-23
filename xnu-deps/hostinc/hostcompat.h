@@ -49,6 +49,25 @@ static inline void host_uuid_generate(unsigned char *out) {
 	out[6] = (out[6] & 0x0f) | 0x40; out[8] = (out[8] & 0x3f) | 0x80;
 }
 #define uuid_generate(x) host_uuid_generate(x)
+/* glibc before 2.38 has no strlcpy/strlcat; some SETUP host tools use them (replacecontents).
+   Only the host tools see this: it is the force-included hostcompat header. */
+#if defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 38))
+static inline size_t host_strlcpy(char *dst, const char *src, size_t size) {
+	size_t n = src ? strlen(src) : 0;
+	if (size) { size_t c = n < size - 1 ? n : size - 1; memcpy(dst, src, c); dst[c] = 0; }
+	return n;
+}
+static inline size_t host_strlcat(char *dst, const char *src, size_t size) {
+	size_t d = 0, n = src ? strlen(src) : 0;
+	while (d < size && dst[d]) d++;
+	if (d == size) return size + n;
+	size_t c = n < size - d - 1 ? n : size - d - 1;
+	memcpy(dst + d, src, c); dst[d + c] = 0;
+	return d + n;
+}
+#define strlcpy host_strlcpy
+#define strlcat host_strlcat
+#endif
 /* BSD setmode/getmode: only absolute octal modes are used by the XNU build */
 static inline void *setmode(const char *s) {
 	char *end; long v = strtol(s, &end, 8);

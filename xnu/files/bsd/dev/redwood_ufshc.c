@@ -59,6 +59,7 @@
 #include <sys/errno.h>
 #include <sys/param.h>
 #include <sys/proc.h>
+#include <sys/redwood_soc.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 #include <vm/vm_kern.h>
@@ -73,7 +74,9 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
 extern void IOSleep(unsigned int milliseconds);
 extern boolean_t ml_set_interrupts_enabled(boolean_t enable);
 
-#define UFSHC_PHYS          0x1d84000ULL        /* ufshc@1d84000, "ufs_mem", in the phone's Android device tree */
+/* (the controller's address is the SoC's: sys/redwood_soc.h. On both phones of this tree it is
+ * 0x1d84000 -- redwood's Android DT "ufs_mem", SM8750's vendor DT ufs@1d84000 -- which is also
+ * what the loader offers in its page, so the check below still compares like with like.) */
 #define UFSHC_SIZE          0x3000
 
 /* UFSHCI registers (JESD223). 0x38..0x48, the UIC error codes, clear when read: never read here. */
@@ -1151,7 +1154,8 @@ ufshc_probe(const struct ufshc_loader *loader, bool only)
 	}
 	PE_parse_boot_argn("ufs_native_leave", &hc_leave, sizeof(hc_leave));
 	PE_parse_boot_argn("ufs_native_hang", &hc_hang_after, sizeof(hc_hang_after));
-	if (loader->hc_pa != UFSHC_PHYS || loader->area_pa == 0 || loader->slots != SLOTS || (loader->area_pa & 0x3ff) ||
+	if (loader->hc_pa != redwood_soc()->ufshc_phys || loader->area_pa == 0 || loader->slots != SLOTS ||
+	    (loader->area_pa & 0x3ff) ||
 	    loader->ucd_size < UCD_PRDT + 16 * (hc_slot_buffer / PRD_MAX + 1) || (loader->ucd_offset & 0x7f) ||
 	    (loader->ucd_size & 0x7f) || loader->ucd_offset < SLOTS * 32 ||
 	    loader->area_size < loader->ucd_offset + SLOTS * loader->ucd_size) {
@@ -1164,7 +1168,7 @@ ufshc_probe(const struct ufshc_loader *loader, bool only)
 		hc_say("ufs: native: not used: the loader's area %llx is memory this kernel manages\n", loader->area_pa);
 		return false;
 	}
-	hc = ml_io_map(UFSHC_PHYS, UFSHC_SIZE);
+	hc = ml_io_map(redwood_soc()->ufshc_phys, UFSHC_SIZE);
 	cap = hc_read(UFSHC_CAP);
 	ver = hc_read(UFSHC_VER);
 	hcs = hc_read(UFSHC_HCS);
@@ -1183,7 +1187,7 @@ ufshc_probe(const struct ufshc_loader *loader, bool only)
 	tm_db = hc_read(UFSHC_UTMRLDBR);
 	tm_rsr = hc_read(UFSHC_UTMRLRSR);
 	hc_say("ufs: native: controller at %llx: CAP %08x (%u slots, 64-bit %s), VER %08x, HCDDID %08x, HCPMID %08x\n",
-	    UFSHC_PHYS, cap, CAP_NUTRS(cap), (cap & CAP_64AS) ? "yes" : "no", ver, hc_read(UFSHC_HCDDID),
+	    redwood_soc()->ufshc_phys, cap, CAP_NUTRS(cap), (cap & CAP_64AS) ? "yes" : "no", ver, hc_read(UFSHC_HCDDID),
 	    hc_read(UFSHC_HCPMID));
 	hc_say("ufs: native: HCE %08x, HCS %08x, IS %08x, IE %08x, UTRIACR %08x, AHIT %08x\n", hce, hcs, is, ie, iacr, ahit);
 	hc_say("ufs: native: transfer list %08x:%08x (the loader's note of UEFI's: %08x:%08x), doorbell %08x, run %08x, "

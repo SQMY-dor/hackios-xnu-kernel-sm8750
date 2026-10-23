@@ -52,8 +52,10 @@ fi
 if ! skip boot && [ "$KIND" = phone ]; then
 	# the UEFI with the loader inside, the way `xl enter` makes it: the loader then brings up its USB link
 	L=xnuloader/loader.efi; [ -f $L ] || L=prebuilt/loader.efi
-	python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=$L --usb > /dev/null
+	python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=$L --usb > /dev/null || die "payload not made"
+	# mkxnuimg.py explains its own failures (a UEFI image that is not this device's, a payload that does
+	# not fit); do not print a boot image that was not written.
 	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
-		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img
+		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img || die "no boot image: see above"
 	echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
 fi

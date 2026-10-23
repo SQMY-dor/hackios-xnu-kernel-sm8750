@@ -112,12 +112,16 @@ stage1() {
 		cp tcsh/tcsh host/bin/tcsh
 	fi
 	link tcsh host/bin/csh
+	# XNU's tools/lldbmacros (installed into the kernel dSYM) start their scripts with
+	# #!/usr/bin/env python; Debian has only python3.
+	[ -x host/bin/python ] || ln -sfn /usr/bin/python3 host/bin/python
 	# what 7z leaves undone when it extracts files of the iOS images (see build/lzbitmap/unzbm.c)
 	if [ ! -x host/bin/unzbm ]; then
 		cc -O2 -w -o host/bin/unzbm build/lzbitmap/unzbm.c build/lzbitmap/libzbitmap.c
 	fi
 	# the Mach-O linker and its companions come with theos
-	for tool in nm otool strip lipo libtool nmedit ctf_insert codesign_allocate install_name_tool; do
+	# dsymutil: MakeInc.kernel runs it for the kernel dSYM (BUILD_DSYM=1)
+	for tool in nm otool strip lipo libtool nmedit ctf_insert codesign_allocate install_name_tool dsymutil; do
 		link "$CCTOOLS/$tool" host/bin/$tool
 	done
 	link "$CCTOOLS/ld" host/bin/ld64

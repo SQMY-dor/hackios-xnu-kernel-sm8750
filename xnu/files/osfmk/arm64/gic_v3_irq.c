@@ -55,12 +55,23 @@
 #define GICD_IGRPMODR(n)        (0x0d00 + 4 * (n))
 #define GICD_IROUTER(n)         (0x6000 + 8 * (n))
 
-#define GICR_FRAME_SIZE         0x20000     /* RD_base + SGI_base per CPU */
 #define GICR_TYPER              0x0008
 #define GICR_TYPER_LAST         (1u << 4)
 #define GICR_WAKER              0x0014
 #define GICR_WAKER_PROCSLEEP    (1u << 1)
 #define GICR_WAKER_CHILDASLEEP  (1u << 2)
+
+/*
+ * How far apart the redistributors of two processors are ("redistributor-stride", as mainline's
+ * arm,gic-v3 binding calls it). It is NOT the same on every SoC: 0x20000 on redwood and on QEMU
+ * (RD_base 0x10000 + SGI_base 0x10000), but 0x40000 on SM8750 (Snapdragon 8 Elite: the vendor
+ * device tree's interrupt-controller@16000000 says so, and mainline's sm8750.dtsi agrees). This is
+ * the value used when /arm-io/gic does not carry the property -- which is every device tree from
+ * before the property existed, redwood's included, so redwood is walked exactly as it always was.
+ * The real value is read into gicr_stride by gic_v3_irq_cpu_init(); walking at the wrong one steps
+ * through the middle of frames, matches no GICR_TYPER affinity, and ends in its panic.
+ */
+#define GICR_FRAME_SIZE_DEFAULT 0x20000ULL
 #define GICR_SGI_BASE           0x10000
 #define GICR_IGROUPR0           (GICR_SGI_BASE + 0x0080)
 #define GICR_ISENABLER0         (GICR_SGI_BASE + 0x0100)
@@ -80,6 +91,7 @@
 
 static vm_offset_t gicd_base, gicr_base;
 static vm_size_t   gicr_size;
+static vm_size_t   gicr_stride = GICR_FRAME_SIZE_DEFAULT;    /* "redistributor-stride" of /arm-io/gic */
 static vm_offset_t gicr_cpu_base[MAX_CPUS]; /* each processor's redistributor frame */
 
 /*
@@ -399,7 +411,7 @@ gic_find_redistributor(void)
 	/* GICR_TYPER[63:32] packs Aff3.Aff2.Aff1.Aff0 */
 	uint32_t affinity = (uint32_t)(((mpidr >> 32) & 0xff) << 24 | (mpidr & 0xffffff));
 
-	for (vm_offset_t frame = gicr_base; frame + GICR_FRAME_SIZE <= gicr_base + gicr_size; frame += GICR_FRAME_SIZE) {
+	for (vm_offset_t frame = gicr_base; frame + gicr_stride <= gicr_base + gicr_size; frame += gicr_stride) {
 		uint64_t typer = *(volatile uint64_t *)(frame + GICR_TYPER);
 
 		if ((uint32_t)(typer >> 32) == affinity) {
@@ -432,6 +444,43 @@ gic_v3_irq_cpu_init(void)
 		}
 		uint64_t const *reg = prop;
 		vm_offset_t soc_base = pe_arm_get_soc_base_phys();
+
+		/*
+		 * "redistributor-stride", when the loader writes one: the spacing the walk above must use.
+		 *
+		 * Read as two 32-bit CELLS, not as one native 64-bit word: the loader writes it as
+		 * <0 stride> in the device tree's own 2-cell form (xnuloader/loader.c:3371, dt_prop of a
+		 * uint32_t[2]), so the two words are 0 and the stride. "reg", above, really is four native
+		 * u64s and must keep being read that way; reading this one as a u64 would give
+		 * 0x400000000 for a stride of 0x40000 -- which is why the cells are combined here.
+		 *
+		 * Absent -- every device tree from before this property existed -- and gicr_stride keeps
+		 * its default of 0x20000, which is what this kernel has always walked at.
+		 */
+		void const *stride_prop;
+		unsigned int stride_size;
+
+		if (SecureDTGetProperty(entry, "redistributor-stride", &stride_prop, &stride_size) == kSuccess) {
+			uint32_t const *cells = stride_prop;
+			uint64_t stride = stride_size >= sizeof(uint32_t) ? cells[0] : 0;
+			int cores = ml_get_cpu_count();
+
+			if (stride_size >= 2 * sizeof(uint32_t)) {
+				stride = (uint64_t)cells[0] << 32 | cells[1];
+			}
+			/*
+			 * What a stride may be: a power of two, at least one frame (0x10000 of RD_base and
+			 * 0x10000 of SGI_base), and small enough that the frames of all the processors still
+			 * fit in the region "reg" gave. Anything else is a device tree this kernel cannot
+			 * walk, and a wrong stride here is not a slow boot but a panic below, so say so.
+			 */
+			if (stride < 0x10000 || (stride & (stride - 1)) != 0 || stride > reg[3] ||
+			    (cores > 0 && stride > reg[3] / (uint64_t)cores)) {
+				panic("gic: unusable redistributor-stride 0x%llx (region 0x%llx) in the device tree",
+				    stride, reg[3]);
+			}
+			gicr_stride = (vm_size_t)stride;
+		}
 
 		simple_lock_init(&gic_spi_lock, 0);
 		gicd_base = ml_io_map(soc_base + reg[0], reg[1]);

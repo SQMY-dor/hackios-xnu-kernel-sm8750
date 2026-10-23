@@ -62,13 +62,14 @@ index a4d25040f38f..aad72993d139 100644
  kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
  
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..9cd24b42caca 100644
+index 44274016a4cf..a0549fdcbc45 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,37 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,38 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
++bsd/dev/redwood_soc.c		standard
 +bsd/dev/redwood_input.c		standard
 +bsd/dev/redwood_virtio_input.c	standard
 +bsd/dev/redwood_goodix.c	standard
@@ -103,7 +104,7 @@ index 44274016a4cf..9cd24b42caca 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +186,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +187,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -118,7 +119,7 @@ index 44274016a4cf..9cd24b42caca 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +400,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +401,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -126,7 +127,7 @@ index 44274016a4cf..9cd24b42caca 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +423,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +424,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -866,6 +867,27 @@ index 003cfb074a99..c597065f24f1 100644
  
  	if (sock == NULL) {
  		return EINVAL;
+diff --git a/bsd/kern/makesyscalls.sh b/bsd/kern/makesyscalls.sh
+index 52992d4cd0af..140fed3bcb71 100755
+--- a/bsd/kern/makesyscalls.sh
++++ b/bsd/kern/makesyscalls.sh
+@@ -671,14 +671,14 @@ s/\$//g
+ 		}
+ 
+ 		printf("#if CONFIG_REQUIRES_U32_MUNGING\n") > sysent
+-		printf("\t{ \(sy_call_t *\)(void (*)(void))%s, %s, %s, %s, %s},",
++		printf("\t{ (sy_call_t *)(void (*)(void))%s, %s, %s, %s, %s},",
+ 				tempname, munge32, munge_ret, argssize, size32) > sysent
+ 		linesize = length(tempname) + length(munge32) + \
+ 			length(munge_ret) + length(argssize) + length(size32) + 28
+ 		align_comment(linesize, 88, sysent)
+ 		printf("/* %d = %s%s*/\n", syscall_num, funcname, additional_comments) > sysent
+ 		printf("#else\n") > sysent
+-		printf("\t{ \(sy_call_t *\)(void (*)(void))%s, %s, %s, %s},\n",
++		printf("\t{ (sy_call_t *)(void (*)(void))%s, %s, %s, %s},\n",
+ 				tempname, munge_ret, argssize, size32) > sysent
+ 		printf("#endif\n") > sysent
+ 		
 diff --git a/bsd/kern/sys_generic.c b/bsd/kern/sys_generic.c
 index 4ca22ee4371a..e95e618b4cb6 100644
 --- a/bsd/kern/sys_generic.c

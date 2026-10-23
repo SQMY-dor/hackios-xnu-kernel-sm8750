@@ -10,6 +10,10 @@
  * says more).
  *
  * Register layout: Linux drivers/cpufreq/qcom-cpufreq-hw.c ("epss" variant).
+ *
+ * The addresses are not this phone's any more, they are the SoC's: sys/redwood_soc.h has them per
+ * SoC, and a SoC whose EPSS address nobody has confirmed yet (SM8750) has no domains, which turns
+ * this whole file off even with cpufreq=1.
  */
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -19,6 +23,7 @@
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/redwood_soc.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
 
@@ -54,9 +59,8 @@ tell(const char *format, ...)
 	}
 }
 
-#define EPSS_PHYS               0x18591000UL    /* three groups ("domains") of 0x1000: small cores, big, biggest */
-#define EPSS_DOMAIN_SIZE        0x1000UL
-#define EPSS_DOMAINS            3
+/* (the EPSS block itself -- its base, its size per domain, and how many domains there are -- is
+ * the SoC's: sys/redwood_soc.h. What is the same on every SoC of this kind is the layout below.) */
 #define EPSS_FREQ_TABLE         0x100           /* a word per row: [31:30] clock source, [7:0] multiple of 19.2 MHz */
 #define EPSS_TABLE_ROWS         40
 #define EPSS_PERF_STATE         0x320           /* the row that is wanted */
@@ -77,22 +81,20 @@ loop_speed(void)
 	return nanos ? (uint32_t)(2000000ULL * 1000 / nanos) : 0;
 }
 
-/* The group of the core with that number in its MPIDR (the device tree's "reg": the number is the second field). */
-static uint32_t
-domain_of(uint32_t phys_id)
-{
-	uint32_t core = (phys_id >> 8) & 0xff;
-
-	return core < 4 ? 0 : core < 7 ? 1 : 2;
-}
+/*
+ * Which group ("domain") the core with that MPIDR is in, and what its number is. Both are the
+ * SoC's -- redwood numbers its cores in one affinity field and has three domains (small, big,
+ * biggest), SM8750 numbers them across two and has a different table -- so both come from
+ * sys/redwood_soc.h. REDWOOD_SOC_NO_DOMAIN: leave that core's cluster alone.
+ */
 
 static void
-raise_domain(uint32_t domain, uint32_t cores)
+raise_domain(const struct redwood_soc *soc, uint32_t domain, uint32_t cores)
 {
 	uint32_t top = 0, top_khz = 0, was;
 	vm_offset_t base;
 
-	base = ml_io_map(EPSS_PHYS + domain * EPSS_DOMAIN_SIZE, EPSS_DOMAIN_SIZE);
+	base = ml_io_map(soc->epss_base + domain * soc->epss_domain_size, soc->epss_domain_size);
 	for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
 		uint32_t entry = *(volatile uint32_t *)(base + EPSS_FREQ_TABLE + 4 * row);
 		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
@@ -306,8 +308,7 @@ load_start(void)
  * left, with what is needed to vote for bandwidth on them -- only read. (membench=2 says the cores
  * together get no more from memory than one alone: 12 GB/s; nobody here votes for more.)
  */
-#define CMD_DB_PHYS             0x80860000UL
-#define CMD_DB_SIZE             0x20000UL
+/* (where the database is: the SoC's -- sys/redwood_soc.h. What is in it is the same everywhere.) */
 #define CMD_DB_BCM              5               /* the kind of resource in a slave's id: bus clock managers */
 
 struct cmd_db_slave {
@@ -332,20 +333,29 @@ struct cmd_db_bcm {                             /* a BCM's auxiliary data (Linux
 	uint8_t vcd, reserved;
 };
 
-/* (the same condition as the cores' clocks: the addresses are this phone's) */
+/*
+ * (the same condition as the cores' clocks: the addresses are the SoC's, and on a SoC whose EPSS
+ * address nobody has confirmed -- SM8750 -- cpufreq=1 is refused rather than written blind)
+ */
 static bool
-cpufreq_wanted(void)
+cpufreq_wanted(const struct redwood_soc *soc)
 {
 	uint32_t on = 0;
 
+	if (soc->epss_domains == 0) {
+		if (PE_parse_boot_argn("cpufreq", &on, sizeof(on)) && on != 0) {
+			tell("cpufreq: not done: no EPSS address is known for this SoC (\"%s\")\n", soc->name);
+		}
+		return false;
+	}
 	return PE_parse_boot_argn("cpufreq", &on, sizeof(on)) && on != 0;
 }
 
 static void
-ddr_look(void)
+ddr_look(const struct redwood_soc *soc)
 {
 	/* (memory, not registers: mapped so that reads of any size and alignment are allowed) */
-	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);
+	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(soc->cmd_db_phys, soc->cmd_db_size);
 
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
 		tell("ddr: no command database\n");
@@ -355,7 +365,7 @@ ddr_look(void)
 		const struct cmd_db_slave *slave = &db->slave[s];
 		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
 
-		if (slave->id != CMD_DB_BCM || slave->header_offset >= CMD_DB_SIZE - 0x1000 || slave->count > 512) {
+		if (slave->id != CMD_DB_BCM || slave->header_offset >= soc->cmd_db_size - 0x1000 || slave->count > 512) {
 			continue;
 		}
 		for (unsigned i = 0; i < slave->count; i++) {
@@ -363,7 +373,7 @@ ddr_look(void)
 			char name[9] = { 0 };
 
 			memcpy(name, entry[i].id, 8);
-			if (entry[i].length >= sizeof(aux) && slave->data_offset + entry[i].offset + sizeof(aux) < CMD_DB_SIZE - 0x40) {
+			if (entry[i].length >= sizeof(aux) && slave->data_offset + entry[i].offset + sizeof(aux) < soc->cmd_db_size - 0x40) {
 				memcpy(&aux, db->data + slave->data_offset + entry[i].offset, sizeof(aux));
 			}
 			tell("ddr: BCM %-8s at %#x: unit %u, width %u, vcd %u (aux %u bytes)\n", name, entry[i].address, aux.unit,
@@ -378,16 +388,15 @@ ddr_look(void)
  * each (sc7280's qcom,tcs-config): every command with an address, and which of them go to the BCMs
  * above -- the bandwidth it asked for, and that is in force whenever the processors are awake.
  */
-#define RSC_PHYS                0x18220000UL
-#define RSC_SIZE                0x10000UL
+/* (the RSC's address too: the SoC's) */
 #define RSC_TCS(n, reg)         (0xd00 + 0x2a0 * (n) + (reg))
 #define RSC_TCS_COUNT           9
 #define RSC_CMDS                16
 
 static void
-ddr_slots(void)
+ddr_slots(const struct redwood_soc *soc)
 {
-	vm_offset_t rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
+	vm_offset_t rsc = ml_io_map(soc->rsc_phys, soc->rsc_size);
 
 	for (unsigned t = 0; t < RSC_TCS_COUNT; t++) {
 		uint32_t enabled = *(volatile uint32_t *)(rsc + RSC_TCS(t, 0x1c));
@@ -436,9 +445,9 @@ static uint32_t ddr_mc0, ddr_sh0, ddr_acv;
 static bool ddr_voted;
 
 static uint32_t
-cmd_db_address(const char *name)
+cmd_db_address(const struct redwood_soc *soc, const char *name)
 {
-	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);
+	const struct cmd_db_header *db = (const struct cmd_db_header *)ml_io_map_wcomb(soc->cmd_db_phys, soc->cmd_db_size);
 	char id[8] = { 0 };
 
 	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
@@ -449,7 +458,7 @@ cmd_db_address(const char *name)
 		const struct cmd_db_slave *slave = &db->slave[s];
 		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
 
-		if (slave->id != CMD_DB_BCM || slave->header_offset >= CMD_DB_SIZE - 0x1000 || slave->count > 512) {
+		if (slave->id != CMD_DB_BCM || slave->header_offset >= soc->cmd_db_size - 0x1000 || slave->count > 512) {
 			continue;
 		}
 		for (unsigned i = 0; i < slave->count; i++) {
@@ -516,19 +525,24 @@ ddr_vote(uint32_t vote)
 }
 
 static void
-ddr_raise(void)
+ddr_raise(const struct redwood_soc *soc)
 {
 	uint32_t vote = 0x3fff;
 
+	if (soc->rsc_phys == 0 || soc->cmd_db_phys == 0) {
+		/* (SM8750: neither address is known yet -- see sys/redwood_soc.h and kernel.md) */
+		tell("ddr: no vote: no RPMh/cmd-db address is known for this SoC (\"%s\")\n", soc->name);
+		return;
+	}
 	PE_parse_boot_argn("ddr_vote", &vote, sizeof(vote));
-	ddr_mc0 = cmd_db_address("MC0");
-	ddr_sh0 = cmd_db_address("SH0");
-	ddr_acv = cmd_db_address("ACV");
+	ddr_mc0 = cmd_db_address(soc, "MC0");
+	ddr_sh0 = cmd_db_address(soc, "SH0");
+	ddr_acv = cmd_db_address(soc, "ACV");
 	if (ddr_mc0 == 0 || ddr_sh0 == 0 || ddr_acv == 0 || vote == 0 || vote > 0x3fff) {
 		tell("ddr: no vote (MC0 %#x, SH0 %#x, ACV %#x, vote %u)\n", ddr_mc0, ddr_sh0, ddr_acv, vote);
 		return;
 	}
-	ddr_rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
+	ddr_rsc = ml_io_map(soc->rsc_phys, soc->rsc_size);
 	ddr_voted = ddr_vote(vote);
 	tell("ddr: memory bandwidth vote %u on MC0 (%#x) and SH0 (%#x)%s\n", vote, ddr_mc0, ddr_sh0, ddr_voted ? "" : ": FAILED");
 }
@@ -558,30 +572,46 @@ void
 redwood_cpufreq_init(void)
 {
 	const ml_topology_info_t *topology = ml_get_topology_info();
-	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
+	const struct redwood_soc *soc = redwood_soc();
+	uint32_t enabled = 0, cores[REDWOOD_SOC_MAX_DOMAINS] = { 0 }, before, here;
+	bool wanted;
 
 	load_start();
+	wanted = cpufreq_wanted(soc);           /* (once: it is also what says why not) */
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
 	if (enabled == 1) {
-		ddr_look();
-		ddr_slots();
-	} else if (enabled == 2 && cpufreq_wanted()) {
-		ddr_raise();
+		if (soc->cmd_db_phys == 0 || soc->rsc_phys == 0) {
+			tell("ddr: nothing to look at: no RPMh/cmd-db address is known for this SoC (\"%s\")\n", soc->name);
+		} else {
+			ddr_look(soc);
+			ddr_slots(soc);
+		}
+	} else if (enabled == 2 && wanted) {
+		ddr_raise(soc);
 	}
+	/*
+	 * (the value cpufreq= had is kept in enabled, as it was before: the membench= check below reads
+	 * whichever of the two came last, and a cpufreq=2 with no membench= has always meant membench=2)
+	 */
 	enabled = 0;
-	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
+	PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled));
+	if (!wanted) {
 		return;
 	}
 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
-		cores[domain_of(topology->cpus[i].phys_id)]++;
+		uint32_t domain = redwood_soc_domain(soc, topology->cpus[i].phys_id);
+
+		if (domain < REDWOOD_SOC_MAX_DOMAINS) {
+			cores[domain]++;
+		}
 	}
 	/* (whichever core this thread happens to be on, and stays on or not: it only goes to the log) */
-	here = (uint32_t)(__builtin_arm_rsr64("MPIDR_EL1") >> 8) & 0xff;
+	here = redwood_soc_core(soc, (uint32_t)__builtin_arm_rsr64("MPIDR_EL1"));
 	before = loop_speed();
-	for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+	for (uint32_t domain = 0; domain < soc->epss_domains && domain < REDWOOD_SOC_MAX_DOMAINS; domain++) {
 		if (cores[domain] != 0) {
-			raise_domain(domain, cores[domain]);
+			raise_domain(soc, domain, cores[domain]);
 		}
 	}
 	printf("cpufreq: on core %u a loop ran at %u, now at %u\n", here, before, loop_speed());
